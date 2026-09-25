@@ -172,7 +172,9 @@ export const createApplication = async (req, res, next) => {
 
 export const getApplications = async (req, res, next) => {
   try {
-    let query = {};
+    let query = {
+      status: { $ne: "VERIFIED" },
+    };
 
     if (req.user.role === "USER") {
       query.applicant = req.user._id;
@@ -232,9 +234,7 @@ export const getApplications = async (req, res, next) => {
           };
         }
 
-        groupedApplications[shopId].applications.push(
-          application
-        );
+        groupedApplications[shopId].applications.push(application);
       });
 
       return sendSuccess(
@@ -494,158 +494,62 @@ export const updateApplicationStatus = async (
 |--------------------------------------------------------------------------
 */
 
-export const submitVerificationResult = async (
-  req,
-  res,
-  next
-) => {
+export const submitVerificationResult = async (req, res, next) => {
   try {
-    const {
-      result,
-      condition,
-      remarks,
-      photographs,
-    } = req.body;
-
-    if (!result || !["PASS", "FAIL"].includes(result)) {
-      throw new ApiError(
-        400,
-        "Valid result (PASS or FAIL) is required"
-      );
-    }
-
-    const application =
-      await Application.findById(req.params.id)
-        .populate("instrument")
-        .populate("applicant")
-        .populate("shop");
+    const { id } = req.params
+    const application = await Application.findById(id)
+      .populate("instrument")
+      .populate("applicant")
+      .populate("shop");
 
     if (!application) {
-      throw new ApiError(
-        404,
-        "Application not found"
-      );
+      throw new ApiError(404, "Application not found");
     }
 
-    // Officer jurisdiction check
+    // Check officer jurisdiction
     if (
       req.user.pin_code &&
-      application.shop?.address?.pincode &&
-      String(
-        application.shop.address.pincode
-      ).trim() !==
+      application.shop?.pincode &&
+      String(application.shop.pincode).trim() !==
         String(req.user.pin_code).trim()
     ) {
       throw new ApiError(
         403,
-        "You do not have jurisdiction to record verification in this area PIN code"
+        "You do not have jurisdiction to verify this application"
       );
     }
 
-    // Assign officer
-    application.assignedOfficer =
-      req.user._id;
+    // Mark as verified
+    application.status = "VERIFIED";
 
-    // Parse photographs
-    const parsedPhotos = Array.isArray(
-      photographs
-    )
-      ? photographs
-      : safeJsonParse(photographs, []);
+    application.assignedOfficer = req.user._id;
 
-    let photoUrls = Array.isArray(parsedPhotos)
-      ? [...parsedPhotos]
-      : [];
-
-    // Uploaded verification photograph
-    if (req.file) {
-      const uploadedUrl =
-        await processUploadedFile(
-          req.file,
-          "verification"
-        );
-
-      photoUrls.push(
-        toAbsoluteUrl(uploadedUrl, req)
-      );
-    }
-
-    // Save verification details
     application.verification = {
       date: new Date(),
-
       officer: req.user._id,
-
-      condition:
-        condition || "SATISFACTORY",
-
-      result,
-
-      remarks,
-
-      photographs: photoUrls,
+      condition: "SATISFACTORY",
+      result: "PASS",
+      remarks: "Verified successfully",
+      photographs: [],
     };
-
-    if (result === "PASS") {
-      application.status = "VERIFIED";
-
-      await application.save();
-
-      // Issue certificate
-      const certificate =
-        await issueCertificateForApplication(
-          application._id,
-          req.user
-        );
-
-      const updatedApplication =
-        await Application.findById(
-          application._id
-        );
-
-      return sendSuccess(
-        res,
-        200,
-        "Verification passed and certificate issued successfully",
-        {
-          application: updatedApplication,
-          certificate,
-        }
-      );
-    }
-
-    // FAIL
-    application.status = "REJECTED";
-
-    application.rejectionReason =
-      remarks ||
-      "Instrument failed verification standards";
 
     await application.save();
 
-    // Update instrument status
-    await Instrument.findByIdAndUpdate(
-      application.instrument._id,
-      {
-        status: "REJECTED",
-      }
+    // Generate certificate + QR + notification + email
+    const certificate = await issueCertificateForApplication(
+      application._id,
+      req.user
     );
 
-    // Notify applicant
-    await createNotification({
-      user: application.applicant._id,
-      application: application._id,
-      type: "REJECTED",
-      title: "Verification Rejected",
-      message: `Application ${application.applicationNumber} was rejected. Reason: ${application.rejectionReason}`,
-    });
+    const updatedApplication = await Application.findById(application._id);
 
     return sendSuccess(
       res,
       200,
-      "Verification result recorded as REJECTED",
+      "Application verified and certificate issued successfully",
       {
-        application,
+        application: updatedApplication,
+        certificate,
       }
     );
   } catch (error) {
@@ -773,6 +677,7 @@ export const getShopApplications = async (req, res, next) => {
 
     const applications = await Application.find({
       shop: shop._id,
+      status: { $ne: "VERIFIED" },
     })
       .populate(
         "instrument",

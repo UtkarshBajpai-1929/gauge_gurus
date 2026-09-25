@@ -52,12 +52,8 @@ const applicationSchema = new mongoose.Schema(
       type: String,
       enum: [
         "SUBMITTED",
-        "UNDER_REVIEW",
-        "SCHEDULED",
         "VERIFIED",
-        "REJECTED",
-        "CERTIFICATE_ISSUED",
-        "COMPLETED",
+        "RESCHEDULED"
       ],
       default: "SUBMITTED",
     },
