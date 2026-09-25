@@ -9,6 +9,7 @@ import { issueCertificateForApplication } from "../services/certificateService.j
 import { createNotification } from "../services/notificationService.js";
 import { processUploadedFile } from "../middleware/uploadMiddleware.js";
 import { safeJsonParse, toAbsoluteUrl } from "../utils/urlHelper.js";
+import User from "../models/user.js";
 
 /*
 |--------------------------------------------------------------------------
@@ -171,121 +172,89 @@ export const createApplication = async (req, res, next) => {
 
 export const getApplications = async (req, res, next) => {
   try {
-    const page = Math.max(
-      1,
-      parseInt(req.query.page, 10) || 1
-    );
+    let query = {};
 
-    const limit = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.limit, 10) || 10)
-    );
-
-    const skip = (page - 1) * limit;
-
-    const query = {};
-
-    // USER → only their applications
     if (req.user.role === "USER") {
       query.applicant = req.user._id;
     }
 
-    // OFFICER → applications from shops in their PIN code
-    else if (req.user.role === "OFFICER") {
-      const officerPincode =
-        req.query.pincode || req.user.pin_code;
+    if (req.user.role === "OFFICER") {
+      const officer = await User.findById(req.user._id)
+        .select("pin_code");
 
-      if (officerPincode) {
-        const shopsInArea = await Shop.find({
-          "address.pincode": String(officerPincode).trim(),
-        }).select("_id");
-
-        const shopIds = shopsInArea.map(
-          (shop) => shop._id
-        );
-
-        query.shop = { $in: shopIds };
+      if (!officer) {
+        throw new ApiError(404, "Officer not found");
       }
+
+      if (!officer.pin_code) {
+        throw new ApiError(
+          400,
+          "Pincode is not assigned to this officer"
+        );
+      }
+
+      const shops = await Shop.find({
+        pincode: officer.pin_code,
+        isActive: true,
+      }).select("_id");
+
+      const shopIds = shops.map((shop) => shop._id);
+
+      query.shop = { $in: shopIds };
     }
 
-    // Filters
-    if (req.query.status) {
-      query.status = req.query.status;
-    }
+    const applications = await Application.find(query)
+      .populate("applicant", "name email phone")
+      .populate(
+        "shop",
+        "shopName licenseNumber pincode address owner gstNumber"
+      )
+      .populate(
+        "instrument",
+        "category serialNumber capacity installationType status"
+      )
+      .populate(
+        "assignedOfficer",
+        "name email phone role pin_code"
+      )
+      .sort({ createdAt: -1 });
 
-    if (req.query.shop) {
-      query.shop = req.query.shop;
-    }
+    if (req.user.role === "OFFICER") {
+      const groupedApplications = {};
 
-    if (req.query.instrument) {
-      query.instrument = req.query.instrument;
-    }
+      applications.forEach((application) => {
+        const shopId = application.shop._id.toString();
 
-    if (req.query.applicationNumber) {
-      query.applicationNumber = new RegExp(
-        req.query.applicationNumber.trim(),
-        "i"
+        if (!groupedApplications[shopId]) {
+          groupedApplications[shopId] = {
+            shop: application.shop,
+            applications: [],
+          };
+        }
+
+        groupedApplications[shopId].applications.push(
+          application
+        );
+      });
+
+      return sendSuccess(
+        res,
+        200,
+        "Applications retrieved successfully",
+        Object.values(groupedApplications)
       );
     }
-
-    // Date filter
-    if (req.query.dateFrom || req.query.dateTo) {
-      query.createdAt = {};
-
-      if (req.query.dateFrom) {
-        query.createdAt.$gte = new Date(req.query.dateFrom);
-      }
-
-      if (req.query.dateTo) {
-        query.createdAt.$lte = new Date(req.query.dateTo);
-      }
-    }
-
-    const [applications, total] = await Promise.all([
-      Application.find(query)
-        .populate(
-          "applicant",
-          "name email phone"
-        )
-        .populate(
-          "shop",
-          "shopName licenseNumber address"
-        )
-        .populate(
-          "instrument",
-          "category serialNumber capacity installationType status"
-        )
-        .populate(
-          "assignedOfficer",
-          "name email phone role"
-        )
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit),
-
-      Application.countDocuments(query),
-    ]);
-
-    const totalPages = Math.ceil(total / limit);
 
     return sendSuccess(
       res,
       200,
       "Applications retrieved successfully",
-      applications,
-      {
-        page,
-        limit,
-        total,
-        totalPages,
-      }
+      applications
     );
   } catch (error) {
     next(error);
   }
 };
-
-
 /*
 |--------------------------------------------------------------------------
 | GET APPLICATION BY ID
@@ -756,6 +725,70 @@ export const rejectApplication = async (
       200,
       "Application rejected successfully",
       application
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getShopApplications = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      throw new ApiError(401, "Unauthorised request");
+    }
+
+    if (req.user.role !== "OFFICER") {
+      throw new ApiError(
+        403,
+        "Only officers can access this resource"
+      );
+    }
+
+    const officer = await User.findById(req.user._id)
+      .select("pin_code");
+
+    if (!officer) {
+      throw new ApiError(404, "Officer not found");
+    }
+
+    if (!officer.pin_code) {
+      throw new ApiError(
+        400,
+        "Pincode is not assigned to this officer"
+      );
+    }
+
+    const shop = await Shop.findOne({
+      _id: req.params.shopId,
+      pincode: officer.pin_code,
+      isActive: true,
+    });
+
+    if (!shop) {
+      throw new ApiError(
+        404,
+        "Shop not found or not assigned to this officer"
+      );
+    }
+
+    const applications = await Application.find({
+      shop: shop._id,
+    })
+      .populate(
+        "instrument",
+        "category serialNumber capacity installationType status"
+      )
+      .populate(
+        "applicant",
+        "name email phone"
+      )
+      .sort({ createdAt: -1 });
+
+    return sendSuccess(
+      res,
+      200,
+      "Shop applications retrieved successfully",
+      applications
     );
   } catch (error) {
     next(error);
