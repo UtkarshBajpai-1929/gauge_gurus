@@ -140,7 +140,7 @@ export const createApplication = async (req, res, next) => {
     });
 
     // Update instrument status
-    instrumentDoc.status = "PENDING_VERIFICATION";
+    instrumentDoc.status = "SUBMITTED";
     await instrumentDoc.save();
 
     // Notify applicant

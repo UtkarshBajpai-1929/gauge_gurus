@@ -1,12 +1,13 @@
-export const getValidityIntervalMonths = (category, options = {}) => {
+export const getValidityIntervalMonths = (
+  category,
+  options = {}
+) => {
   if (options.isStorageTank) {
     return 60;
   }
 
   switch (category) {
     case "TAPE_MEASURE":
-      return 24;
-
     case "WEIGHING_SCALE":
       return 24;
 
@@ -31,13 +32,28 @@ export const getValidityIntervalMonths = (category, options = {}) => {
   }
 };
 
-export const calculateCertificateDates = (instrumentCategory, fromDate = new Date(), options = {}) => {
+export const calculateCertificateDates = (
+  instrumentCategory,
+  fromDate = new Date(),
+  options = {}
+) => {
   const validFrom = new Date(fromDate);
-  const months = getValidityIntervalMonths(instrumentCategory, options);
+
+  const months = getValidityIntervalMonths(
+    instrumentCategory,
+    options
+  );
 
   const validUntil = new Date(validFrom);
-  validUntil.setMonth(validUntil.getMonth() + months);
-  validUntil.setDate(validUntil.getDate() - 1);
+
+  validUntil.setMonth(
+    validUntil.getMonth() + months
+  );
+
+  validUntil.setDate(
+    validUntil.getDate() - 1
+  );
+
   validUntil.setHours(23, 59, 59, 999);
 
   return {

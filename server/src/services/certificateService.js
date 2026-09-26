@@ -1,67 +1,138 @@
 import crypto from "crypto";
+import fs from "fs";
+
 import Certificate from "../models/certificate.js";
 import Application from "../models/application.js";
 import Instrument from "../models/instrument.js";
-import ApiError from "../utils/apiError.js";
-import { generateCertificateNumber, generateStampCode } from "../utils/idGenerator.js";
-import { calculateCertificateDates } from "./validityService.js";
-import { buildVerificationUrl, generateQrDataUrl } from "./qrService.js";
-import { generateCertificatePdf } from "./pdfService.js";
-import { createNotification } from "./notificationService.js";
-import { sendVerificationSuccessEmail } from "./emailService.js";
 
-export const issueCertificateForApplication = async (applicationId, officerUser) => {
-  const application = await Application.findById(applicationId)
-    .populate("applicant", "name email phone")
+import ApiError from "../utils/apiError.js";
+
+import {
+  generateCertificateNumber,
+  generateStampCode,
+} from "../utils/idGenerator.js";
+
+import {
+  calculateCertificateDates,
+} from "./validityService.js";
+
+import {
+  buildVerificationUrl,
+  generateQrDataUrl,
+} from "./qrService.js";
+
+import {
+  generateCertificatePdf,
+} from "./pdfService.js";
+
+import {
+  uploadPdfToCloudinary,
+} from "./cloudinaryService.js";
+
+import {
+  createNotification,
+} from "./notificationService.js";
+
+import {
+  sendVerificationSuccessEmail,
+} from "./emailService.js";
+
+export const issueCertificateForApplication = async (
+  applicationId,
+  officerUser
+) => {
+  const application = await Application.findById(
+    applicationId
+  )
+    .populate(
+      "applicant",
+      "name email phone"
+    )
     .populate({
       path: "shop",
-      populate: { path: "owner", select: "name email phone" },
+      populate: {
+        path: "owner",
+        select: "name email phone",
+      },
     })
     .populate("instrument")
-    .populate("assignedOfficer", "name email phone role");
+    .populate(
+      "assignedOfficer",
+      "name email phone role pin_code"
+    );
 
   if (!application) {
-    throw new ApiError(404, "Application not found");
+    throw new ApiError(
+      404,
+      "Application not found"
+    );
   }
 
   if (application.status !== "VERIFIED") {
     throw new ApiError(
       400,
-      `Cannot issue certificate. Application must be in 'VERIFIED' status, but is currently '${application.status}'`
+      `Cannot issue certificate. Application must be VERIFIED, but is currently ${application.status}`
     );
   }
 
-  const existingCert = await Certificate.findOne({
-    application: applicationId,
-    status: "ACTIVE",
-  });
+  // Prevent duplicate certificate
+  const existingCertificate =
+    await Certificate.findOne({
+      application: application._id,
+      status: "ACTIVE",
+    });
 
-  if (existingCert) {
-    return existingCert;
+  if (existingCertificate) {
+    return existingCertificate;
   }
 
-  const certificateNumber = generateCertificateNumber();
-  const stampCode =
-    application.verificationDetails?.stampCode || generateStampCode();
+  const certificateNumber =
+    generateCertificateNumber();
 
-  const { validFrom, validUntil } = calculateCertificateDates(
+  const stampCode =
+    generateStampCode();
+
+  const verificationDate =
+    application.verification?.date ||
+    new Date();
+
+  const {
+    validFrom,
+    validUntil,
+  } = calculateCertificateDates(
     application.instrument.category,
-    application.verificationDetails?.verificationDate || new Date()
+    verificationDate
   );
 
-  const verificationUrl = buildVerificationUrl(certificateNumber);
-  const qrCodeDataUrl = await generateQrDataUrl(verificationUrl);
+  // Generate QR
+  const verificationUrl =
+    buildVerificationUrl(
+      certificateNumber
+    );
 
+  const qrCodeDataUrl =
+    await generateQrDataUrl(
+      verificationUrl
+    );
+
+  // Generate digital signature
   const digitalSignature = crypto
-    .createHmac("sha256", process.env.JWT_SECRET || "maanak_setu_secret")
-    .update(`${certificateNumber}-${application._id}-${stampCode}-${validUntil.toISOString()}`)
+    .createHmac(
+      "sha256",
+      process.env.JWT_SECRET ||
+        "maanak_setu_secret"
+    )
+    .update(
+      `${certificateNumber}-${application._id}-${stampCode}-${validUntil.toISOString()}`
+    )
     .digest("hex");
 
+  // Create certificate
   const certificate = new Certificate({
     certificateNumber,
     application: application._id,
-    instrument: application.instrument._id,
-    previousCertificate: application.previousCertificate || null,
+    instrument:
+      application.instrument._id,
     issueDate: new Date(),
     validFrom,
     validUntil,
@@ -74,59 +145,108 @@ export const issueCertificateForApplication = async (applicationId, officerUser)
 
   await certificate.save();
 
-  // If this was a re-verification and had a previous certificate, mark previous certificate as EXPIRED
-  if (application.previousCertificate) {
-    await Certificate.findByIdAndUpdate(application.previousCertificate, {
-      status: "EXPIRED",
-    });
-  }
+  // Keep local PDF path until email is sent
+  let pdfPath = null;
 
-  // Generate PDF
+  // Generate PDF and upload to Cloudinary
   try {
-    const pdfUrl = await generateCertificatePdf({
-      certificate,
-      application,
-      instrument: application.instrument,
-      shop: application.shop,
-      officer: officerUser || application.assignedOfficer,
-      qrDataUrl: qrCodeDataUrl,
-    });
+    pdfPath =
+      await generateCertificatePdf({
+        certificate,
+        application,
+        instrument:
+          application.instrument,
+        shop: application.shop,
+        officer:
+          officerUser ||
+          application.assignedOfficer,
+        qrDataUrl: qrCodeDataUrl,
+      });
+
+    console.log(
+      "Certificate PDF generated:",
+      pdfPath
+    );
+
+    const pdfUrl =
+      await uploadPdfToCloudinary(
+        pdfPath,
+        certificate.certificateNumber
+      );
+
     certificate.pdfUrl = pdfUrl;
+
     await certificate.save();
-  } catch (pdfErr) {
-    console.error("PDF generation failed:", pdfErr.message);
+
+    console.log(
+      "Certificate PDF uploaded:",
+      pdfUrl
+    );
+  } catch (error) {
+    console.error(
+      "Certificate PDF generation/upload failed:",
+      error.message
+    );
   }
 
-  // Update Application status to CERTIFICATE_ISSUED -> COMPLETED
-  application.status = "COMPLETED";
-  await application.save();
+  // Instrument is verified
+  await Instrument.findByIdAndUpdate(
+    application.instrument._id,
+    {
+      status: "VERIFIED",
+    }
+  );
 
-  // Update Instrument status to VERIFIED
-  await Instrument.findByIdAndUpdate(application.instrument._id, {
-    status: "VERIFIED",
-  });
-
-  // Notify applicant
+  // Notification
   await createNotification({
-    user: application.applicant._id,
-    application: application._id,
-    certificate: certificate._id,
+    user:
+      application.applicant._id,
+    application:
+      application._id,
+    certificate:
+      certificate._id,
     type: "CERTIFICATE_ISSUED",
-    title: "Verification Certificate Issued",
-    message: `Digital Verification Certificate ${certificate.certificateNumber} has been issued for instrument ${application.instrument.serialNumber}.`,
+    title:
+      "Verification Certificate Issued",
+    message:
+      `Digital Verification Certificate ${certificate.certificateNumber} has been issued for instrument ${application.instrument.serialNumber}.`,
   });
 
-  // Automatically send email with verification certificate attachment (isolated error boundary)
-  try {
+  // Email
+  const emailResult =
     await sendVerificationSuccessEmail({
       application,
       certificate,
-      instrument: application.instrument,
+      instrument:
+        application.instrument,
       shop: application.shop,
-      officer: officerUser || application.assignedOfficer,
+      officer:
+        officerUser ||
+        application.assignedOfficer,
+      pdfPath,
     });
-  } catch (emailErr) {
-    console.error("[CertificateService] Verification email failed:", emailErr.message);
+
+  console.log(
+    "EMAIL RESULT:",
+    emailResult
+  );
+
+  // Delete temporary PDF only after email attempt
+  if (pdfPath) {
+    try {
+      await fs.promises.unlink(
+        pdfPath
+      );
+
+      console.log(
+        "Temporary certificate PDF deleted"
+      );
+    } catch (error) {
+      console.error(
+        "Failed to delete temporary certificate PDF:",
+        error.message
+      );
+    }
   }
 
   return certificate;

@@ -87,6 +87,7 @@ export const register = async (req, res, next) => {
 };
 
 export const login = async (req, res, next) => {
+  console.log("Login route")
   try {
     const { email, password } = req.body;
 
